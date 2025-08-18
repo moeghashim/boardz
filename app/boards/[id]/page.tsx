@@ -1,89 +1,58 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import {
-  Pencil,
-  Trash2,
-  Edit3,
-  Plus,
-  ChevronDown,
-  Settings,
-  LogOut,
-  Search,
-  User,
-} from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { ChevronDown, Search, Copy, Trash2, Settings, X } from "lucide-react";
 import Link from "next/link";
-import { signOut } from "next-auth/react";
+import { BetaBadge } from "@/components/ui/beta-badge";
 import { FullPageLoader } from "@/components/ui/loader";
 import { FilterPopover } from "@/components/ui/filter-popover";
+import { Note as NoteCard } from "@/components/note";
 
-interface ChecklistItem {
-  id: string;
-  content: string;
-  checked: boolean;
-  order: number;
-}
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+// Use shared types from components
+import type { Note, Board, User } from "@/components/note";
+import { useTheme } from "next-themes";
+import { ProfileDropdown } from "@/components/profile-dropdown";
+import { toast } from "sonner";
+import { useUser } from "@/app/contexts/UserContext";
+import {
+  getResponsiveConfig,
+  getUniqueAuthors,
+  calculateGridLayout,
+  calculateMobileLayout,
+  filterAndSortNotes,
+} from "@/lib/utils";
 
-interface Note {
-  id: string;
-  content: string;
-  color: string;
-  done: boolean;
-  createdAt: string;
-  updatedAt: string;
-  isChecklist?: boolean;
-  checklistItems?: ChecklistItem[];
-  user: {
-    id: string;
-    name: string | null;
-    email: string;
-  };
-  board?: {
-    id: string;
-    name: string;
-  };
-}
-
-interface Board {
-  id: string;
-  name: string;
-  description: string | null;
-}
-
-interface User {
-  id: string;
-  name: string | null;
-  email: string;
-  isAdmin: boolean;
-  organization: {
-    name: string;
-  } | null;
-}
-
-
-export default function BoardPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+export default function BoardPage({ params }: { params: Promise<{ id: string }> }) {
   const [board, setBoard] = useState<Board | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
+  const { resolvedTheme } = useTheme();
   const [allBoards, setAllBoards] = useState<Board[]>([]);
-  const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [editingNote, setEditingNote] = useState<string | null>(null);
-  const [editContent, setEditContent] = useState("");
+  const [notesloading, setNotesLoading] = useState(true);
+  const { user, loading: userLoading } = useUser();
+  // Inline editing state removed; handled within Note component
   const [showBoardDropdown, setShowBoardDropdown] = useState(false);
-  const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [showAddBoard, setShowAddBoard] = useState(false);
   const [newBoardName, setNewBoardName] = useState("");
   const [newBoardDescription, setNewBoardDescription] = useState("");
   const [boardId, setBoardId] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
   const [dateRange, setDateRange] = useState<{
     startDate: Date | null;
     endDate: Date | null;
@@ -92,64 +61,59 @@ export default function BoardPage({
     endDate: null,
   });
   const [selectedAuthor, setSelectedAuthor] = useState<string | null>(null);
-  const [showDoneNotes, setShowDoneNotes] = useState(false);
-  const [addingChecklistItem, setAddingChecklistItem] = useState<string | null>(
-    null
-  );
-  const [newChecklistItemContent, setNewChecklistItemContent] = useState("");
-  const [editingChecklistItem, setEditingChecklistItem] = useState<{
-    noteId: string;
-    itemId: string;
-  } | null>(null);
-  const [editingChecklistItemContent, setEditingChecklistItemContent] =
-    useState("");
-  const [animatingItems, setAnimatingItems] = useState<Set<string>>(new Set());
+  const [addingChecklistItem, setAddingChecklistItem] = useState<string | null>(null);
+  // Per-item edit and animations are handled inside Note component now
+  const [errorDialog, setErrorDialog] = useState<{
+    open: boolean;
+    title: string;
+    description: string;
+  }>({ open: false, title: "", description: "" });
+  const pendingDeleteTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const [boardSettingsDialog, setBoardSettingsDialog] = useState(false);
+  const [boardSettings, setBoardSettings] = useState({
+    name: "",
+    description: "",
+    isPublic: false,
+    sendSlackUpdates: true,
+  });
+  const [copiedPublicUrl, setCopiedPublicUrl] = useState(false);
+  const [deleteConfirmDialog, setDeleteConfirmDialog] = useState(false);
   const boardRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  useEffect(() => {
+    if (!userLoading && !user) {
+      router.push("/auth/signin");
+    }
+  }, [user, userLoading, router]);
 
   // Update URL with current filter state
   const updateURL = (
     newSearchTerm?: string,
     newDateRange?: { startDate: Date | null; endDate: Date | null },
-    newAuthor?: string | null,
-    newShowDone?: boolean
+    newAuthor?: string | null
   ) => {
     const params = new URLSearchParams();
 
-    const currentSearchTerm =
-      newSearchTerm !== undefined ? newSearchTerm : searchTerm;
-    const currentDateRange =
-      newDateRange !== undefined ? newDateRange : dateRange;
+    const currentSearchTerm = newSearchTerm !== undefined ? newSearchTerm : searchTerm;
+    const currentDateRange = newDateRange !== undefined ? newDateRange : dateRange;
     const currentAuthor = newAuthor !== undefined ? newAuthor : selectedAuthor;
-    const currentShowDone =
-      newShowDone !== undefined ? newShowDone : showDoneNotes;
 
     if (currentSearchTerm) {
       params.set("search", currentSearchTerm);
     }
 
     if (currentDateRange.startDate) {
-      params.set(
-        "startDate",
-        currentDateRange.startDate.toISOString().split("T")[0]
-      );
+      params.set("startDate", currentDateRange.startDate.toISOString().split("T")[0]);
     }
 
     if (currentDateRange.endDate) {
-      params.set(
-        "endDate",
-        currentDateRange.endDate.toISOString().split("T")[0]
-      );
+      params.set("endDate", currentDateRange.endDate.toISOString().split("T")[0]);
     }
 
     if (currentAuthor) {
       params.set("author", currentAuthor);
-    }
-
-    if (currentShowDone) {
-      // Only add if not default (false)
-      params.set("showDone", "true");
     }
 
     const queryString = params.toString();
@@ -163,7 +127,6 @@ export default function BoardPage({
     const urlStartDate = searchParams.get("startDate");
     const urlEndDate = searchParams.get("endDate");
     const urlAuthor = searchParams.get("author");
-    const urlShowDone = searchParams.get("showDone");
 
     setSearchTerm(urlSearchTerm);
 
@@ -187,255 +150,6 @@ export default function BoardPage({
 
     setDateRange({ startDate, endDate });
     setSelectedAuthor(urlAuthor);
-    // Default to false if not specified, otherwise parse the boolean
-    setShowDoneNotes(urlShowDone === null ? false : urlShowDone === "true");
-  };
-
-  // Enhanced responsive grid configuration
-  const getResponsiveConfig = () => {
-    if (typeof window === "undefined")
-      return {
-        noteWidth: 320,
-        gridGap: 20,
-        containerPadding: 20,
-        notePadding: 16,
-      };
-
-    const width = window.innerWidth;
-
-    // Ultra-wide screens (1920px+)
-    if (width >= 1920) {
-      return {
-        noteWidth: 340,
-        gridGap: 24,
-        containerPadding: 32,
-        notePadding: 18,
-      };
-    }
-    // Large desktop (1200px-1919px)
-    else if (width >= 1200) {
-      return {
-        noteWidth: 320,
-        gridGap: 20,
-        containerPadding: 24,
-        notePadding: 16,
-      };
-    }
-    // Medium desktop/laptop (768px-1199px)
-    else if (width >= 768) {
-      return {
-        noteWidth: 300,
-        gridGap: 16,
-        containerPadding: 20,
-        notePadding: 16,
-      };
-    }
-    // Small tablet (600px-767px)
-    else if (width >= 600) {
-      return {
-        noteWidth: 280,
-        gridGap: 16,
-        containerPadding: 16,
-        notePadding: 14,
-      };
-    }
-    // Mobile (less than 600px)
-    else {
-      return {
-        noteWidth: 260,
-        gridGap: 12,
-        containerPadding: 12,
-        notePadding: 12,
-      };
-    }
-  };
-
-  // Helper function to calculate note height based on content
-  const calculateNoteHeight = (
-    note: Note,
-    noteWidth?: number,
-    notePadding?: number
-  ) => {
-    const config = getResponsiveConfig();
-    const actualNotePadding = notePadding || config.notePadding;
-    const actualNoteWidth = noteWidth || config.noteWidth;
-
-    const headerHeight = 76; // User info header + margins (more accurate)
-    const paddingHeight = actualNotePadding * 2; // Top and bottom padding
-    const minContentHeight = 84; // Minimum content area (3 lines)
-
-    if (note.isChecklist && note.checklistItems) {
-      // For checklist items, calculate height based on number of items
-      const itemHeight = 32; // Each checklist item is about 32px tall (text + padding)
-      const itemSpacing = 8; // Space between items
-      const checklistItemsCount = note.checklistItems.length;
-      const addingItemHeight = addingChecklistItem === note.id ? 32 : 0; // Add height for input field
-
-      const checklistHeight =
-        checklistItemsCount * itemHeight +
-        (checklistItemsCount - 1) * itemSpacing +
-        addingItemHeight;
-      const totalChecklistHeight = Math.max(minContentHeight, checklistHeight);
-
-      return headerHeight + paddingHeight + totalChecklistHeight + 40; // Extra space for + button
-    } else {
-      // Original logic for regular notes
-      const lines = note.content.split("\n");
-
-      // Estimate character width and calculate text wrapping
-      const avgCharWidth = 9; // Average character width in pixels
-      const contentWidth = actualNoteWidth - actualNotePadding * 2 - 16; // Note width minus padding and margins
-      const charsPerLine = Math.floor(contentWidth / avgCharWidth);
-
-      // Calculate total lines including wrapped text
-      let totalLines = 0;
-      lines.forEach((line) => {
-        if (line.length === 0) {
-          totalLines += 1; // Empty line
-        } else {
-          const wrappedLines = Math.ceil(line.length / charsPerLine);
-          totalLines += Math.max(1, wrappedLines);
-        }
-      });
-
-      // Ensure minimum content
-      totalLines = Math.max(3, totalLines);
-
-      // Calculate based on actual text content with wrapping
-      const lineHeight = 28; // Line height for readability (leading-7)
-      const contentHeight = totalLines * lineHeight;
-
-      return (
-        headerHeight + paddingHeight + Math.max(minContentHeight, contentHeight)
-      );
-    }
-  };
-
-  // Helper function to calculate bin-packed layout for desktop
-  const calculateGridLayout = () => {
-    if (typeof window === "undefined") return [];
-
-    const config = getResponsiveConfig();
-    const containerWidth = window.innerWidth - config.containerPadding * 2;
-    const noteWidthWithGap = config.noteWidth + config.gridGap;
-    const columnsCount = Math.floor(
-      (containerWidth + config.gridGap) / noteWidthWithGap
-    );
-    const actualColumnsCount = Math.max(1, columnsCount);
-
-    // Calculate the actual available width and adjust note width to fill better
-    const availableWidthForNotes =
-      containerWidth - (actualColumnsCount - 1) * config.gridGap;
-    const calculatedNoteWidth = Math.floor(
-      availableWidthForNotes / actualColumnsCount
-    );
-    // Ensure notes don't get too narrow or too wide based on screen size
-    const minWidth = config.noteWidth - 40;
-    const maxWidth = config.noteWidth + 80;
-    const adjustedNoteWidth = Math.max(
-      minWidth,
-      Math.min(maxWidth, calculatedNoteWidth)
-    );
-
-    // Use full width with minimal left offset
-    const offsetX = config.containerPadding;
-
-    // Bin-packing algorithm: track the bottom Y position of each column
-    const columnBottoms: number[] = new Array(actualColumnsCount).fill(
-      config.containerPadding
-    );
-
-    return filteredNotes.map((note) => {
-      const noteHeight = calculateNoteHeight(
-        note,
-        adjustedNoteWidth,
-        config.notePadding
-      );
-
-      // Find the column with the lowest bottom position
-      let bestColumn = 0;
-      let minBottom = columnBottoms[0];
-
-      for (let col = 1; col < actualColumnsCount; col++) {
-        if (columnBottoms[col] < minBottom) {
-          minBottom = columnBottoms[col];
-          bestColumn = col;
-        }
-      }
-
-      // Place the note in the best column
-      const x = offsetX + bestColumn * (adjustedNoteWidth + config.gridGap);
-      const y = columnBottoms[bestColumn];
-
-      // Update the column bottom position
-      columnBottoms[bestColumn] = y + noteHeight + config.gridGap;
-
-      return {
-        ...note,
-        x,
-        y,
-        width: adjustedNoteWidth,
-        height: noteHeight,
-      };
-    });
-  };
-
-  // Helper function to calculate mobile layout (optimized single/double column)
-  const calculateMobileLayout = () => {
-    if (typeof window === "undefined") return [];
-
-    const config = getResponsiveConfig();
-    const containerWidth = window.innerWidth - config.containerPadding * 2;
-    const minNoteWidth = config.noteWidth - 20; // Slightly smaller minimum for mobile
-    const columnsCount = Math.floor(
-      (containerWidth + config.gridGap) / (minNoteWidth + config.gridGap)
-    );
-    const actualColumnsCount = Math.max(1, columnsCount);
-
-    // Calculate note width for mobile
-    const availableWidthForNotes =
-      containerWidth - (actualColumnsCount - 1) * config.gridGap;
-    const noteWidth = Math.floor(availableWidthForNotes / actualColumnsCount);
-
-    // Bin-packing for mobile with fewer columns
-    const columnBottoms: number[] = new Array(actualColumnsCount).fill(
-      config.containerPadding
-    );
-
-    return filteredNotes.map((note) => {
-      const noteHeight = calculateNoteHeight(
-        note,
-        noteWidth,
-        config.notePadding
-      );
-
-      // Find the column with the lowest bottom position
-      let bestColumn = 0;
-      let minBottom = columnBottoms[0];
-
-      for (let col = 1; col < actualColumnsCount; col++) {
-        if (columnBottoms[col] < minBottom) {
-          minBottom = columnBottoms[col];
-          bestColumn = col;
-        }
-      }
-
-      // Place the note in the best column
-      const x =
-        config.containerPadding + bestColumn * (noteWidth + config.gridGap);
-      const y = columnBottoms[bestColumn];
-
-      // Update the column bottom position
-      columnBottoms[bestColumn] = y + noteHeight + config.gridGap;
-
-      return {
-        ...note,
-        x,
-        y,
-        width: noteWidth,
-        height: noteHeight,
-      };
-    });
   };
 
   useEffect(() => {
@@ -459,40 +173,10 @@ export default function BoardPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardId]);
 
-  const isEditingRef = useRef(false);           // always up‑to‑date in the interval
-
-  useEffect(() => {
-    isEditingRef.current = editingNote !== null; // editingNote already exists in state
-  }, [editingNote]);
-  useEffect(() => {
-    let cancelled = false;
-    const inFlight = { v: false };
-  
-    const tick = async () => {
-      if (cancelled || isEditingRef.current || inFlight.v) return;  // 🔐 bail out
-      inFlight.v = true;
-      try {
-        await fetchBoardData();   // same helper you added earlier
-      } finally {
-        inFlight.v = false;
-      }
-    };
-  
-    const id = setInterval(tick, 5_000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [boardId]);   // restart when the user switches boards
-
   // Close dropdowns when clicking outside and handle escape key
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (
-        showBoardDropdown ||
-        showUserDropdown ||
-        showAddBoard
-      ) {
+      if (showBoardDropdown || showAddBoard) {
         const target = event.target as Element;
         if (
           !target.closest(".board-dropdown") &&
@@ -500,7 +184,6 @@ export default function BoardPage({
           !target.closest(".add-board-modal")
         ) {
           setShowBoardDropdown(false);
-          setShowUserDropdown(false);
           setShowAddBoard(false);
         }
       }
@@ -508,23 +191,11 @@ export default function BoardPage({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        if (editingNote) {
-          setEditingNote(null);
-          setEditContent("");
-        }
         if (addingChecklistItem) {
           setAddingChecklistItem(null);
-          setNewChecklistItemContent("");
-        }
-        if (editingChecklistItem) {
-          setEditingChecklistItem(null);
-          setEditingChecklistItemContent("");
         }
         if (showBoardDropdown) {
           setShowBoardDropdown(false);
-        }
-        if (showUserDropdown) {
-          setShowUserDropdown(false);
         }
         if (showAddBoard) {
           setShowAddBoard(false);
@@ -540,14 +211,9 @@ export default function BoardPage({
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [
-    showBoardDropdown,
-    showUserDropdown,
-    showAddBoard,
-    editingNote,
-    addingChecklistItem,
-    editingChecklistItem,
-  ]);
+  }, [showBoardDropdown, showAddBoard, addingChecklistItem]);
+
+  // Removed debounce cleanup effect; editing is scoped to Note
 
   // Enhanced responsive handling with debounced resize and better breakpoints
   useEffect(() => {
@@ -576,185 +242,99 @@ export default function BoardPage({
     };
   }, []);
 
-  // Get unique authors from notes
-  const getUniqueAuthors = (notes: Note[]) => {
-    const authorsMap = new Map<
-      string,
-      { id: string; name: string; email: string }
-    >();
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+      updateURL(searchTerm);
+    }, 1000);
 
-    notes.forEach((note) => {
-      if (!authorsMap.has(note.user.id)) {
-        authorsMap.set(note.user.id, {
-          id: note.user.id,
-          name: note.user.name || note.user.email.split("@")[0],
-          email: note.user.email,
-        });
-      }
-    });
-
-    return Array.from(authorsMap.values()).sort((a, b) =>
-      a.name.localeCompare(b.name)
-    );
-  };
-
-  // Filter notes based on search term, date range, author, and done status
-  const filterAndSortNotes = (
-    notes: Note[],
-    searchTerm: string,
-    dateRange: { startDate: Date | null; endDate: Date | null },
-    authorId: string | null,
-    showDone: boolean,
-    currentUser: User | null
-  ): Note[] => {
-    let filteredNotes = notes;
-
-    // Filter by done status
-    if (!showDone) {
-      filteredNotes = filteredNotes.filter((note) => !note.done);
-    }
-
-    // Filter by search term
-    if (searchTerm.trim()) {
-      const search = searchTerm.toLowerCase();
-      filteredNotes = filteredNotes.filter((note) => {
-        const authorName = (note.user.name || note.user.email).toLowerCase();
-        const noteContent = note.content.toLowerCase();
-        return authorName.includes(search) || noteContent.includes(search);
-      });
-    }
-
-    // Filter by author
-    if (authorId) {
-      filteredNotes = filteredNotes.filter((note) => note.user.id === authorId);
-    }
-
-    // Filter by date range
-    if (dateRange.startDate || dateRange.endDate) {
-      filteredNotes = filteredNotes.filter((note) => {
-        const noteDate = new Date(note.createdAt);
-        const startOfDay = (date: Date) =>
-          new Date(date.getFullYear(), date.getMonth(), date.getDate());
-        const endOfDay = (date: Date) =>
-          new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            date.getDate(),
-            23,
-            59,
-            59,
-            999
-          );
-
-        if (dateRange.startDate && dateRange.endDate) {
-          return (
-            noteDate >= startOfDay(dateRange.startDate) &&
-            noteDate <= endOfDay(dateRange.endDate)
-          );
-        } else if (dateRange.startDate) {
-          return noteDate >= startOfDay(dateRange.startDate);
-        } else if (dateRange.endDate) {
-          return noteDate <= endOfDay(dateRange.endDate);
-        }
-        return true;
-      });
-    }
-
-    // Sort notes with user priority (current user's notes first) and then by creation date (newest first)
-    filteredNotes.sort((a, b) => {
-      // First priority: logged-in user's notes come first
-      if (currentUser) {
-        const aIsCurrentUser = a.user.id === currentUser.id;
-        const bIsCurrentUser = b.user.id === currentUser.id;
-
-        if (aIsCurrentUser && !bIsCurrentUser) {
-          return -1; // a (current user's note) comes first
-        }
-        if (!aIsCurrentUser && bIsCurrentUser) {
-          return 1; // b (current user's note) comes first
-        }
-      }
-
-      // Second priority: done status (undone notes first) if showing done notes
-      if (showDone && a.done !== b.done) {
-        return a.done ? 1 : -1; // Undone notes (false) come first
-      }
-
-      // Third priority: newest first
-      return (
-        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      );
-    });
-
-    return filteredNotes;
-  };
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
 
   // Get unique authors for dropdown
-  const uniqueAuthors = getUniqueAuthors(notes);
+  const uniqueAuthors = useMemo(() => getUniqueAuthors(notes), [notes]);
 
   // Get filtered and sorted notes for display
-  const filteredNotes = filterAndSortNotes(
-    notes,
-    searchTerm,
-    dateRange,
-    selectedAuthor,
-    showDoneNotes,
-    user
+  const filteredNotes = useMemo(
+    () => filterAndSortNotes(notes, debouncedSearchTerm, dateRange, selectedAuthor, user),
+    [notes, debouncedSearchTerm, dateRange, selectedAuthor, user]
   );
+  const layoutNotes = useMemo(
+    () =>
+      isMobile
+        ? calculateMobileLayout(filteredNotes, addingChecklistItem)
+        : calculateGridLayout(filteredNotes, addingChecklistItem),
+    [isMobile, filteredNotes, addingChecklistItem]
+  );
+
+  const boardHeight = useMemo(() => {
+    if (layoutNotes.length === 0) {
+      return "calc(100vh - 64px)";
+    }
+    const maxBottom = Math.max(...layoutNotes.map((note) => note.y + note.height));
+    const minHeight = typeof window !== "undefined" && window.innerWidth < 768 ? 500 : 600;
+    const calculatedHeight = Math.max(minHeight, maxBottom + 100);
+    return `${calculatedHeight}px`;
+  }, [layoutNotes]);
 
   const fetchBoardData = async () => {
     try {
-      // Get user info first to check authentication
-      const userResponse = await fetch("/api/user");
-      if (userResponse.status === 401) {
-        router.push("/auth/signin");
-        return;
-      }
-
-      if (userResponse.ok) {
-        const userData = await userResponse.json();
-        setUser(userData);
-      }
-
       // Fetch all boards for the dropdown
-      const allBoardsResponse = await fetch("/api/boards");
-      if (allBoardsResponse.ok) {
-        const { boards } = await allBoardsResponse.json();
-        setAllBoards(boards);
-      }
+      let allBoardsResponse: Response;
+      let notesResponse: Response | undefined;
+      let boardResponse: Response | undefined;
 
       if (boardId === "all-notes") {
         // For all notes view, create a virtual board object and fetch all notes
+        [allBoardsResponse, notesResponse] = await Promise.all([
+          fetch("/api/boards"),
+          fetch(`/api/boards/all-notes/notes`),
+        ]);
+
         setBoard({
           id: "all-notes",
           name: "All notes",
           description: "Notes from all boards",
         });
+      } else if (boardId === "archive") {
+        [allBoardsResponse, notesResponse] = await Promise.all([
+          fetch("/api/boards"),
+          fetch(`/api/boards/archive/notes`),
+        ]);
 
-        // Fetch notes from all boards
-        const notesResponse = await fetch(`/api/boards/all-notes/notes`);
-        if (notesResponse.ok) {
-          const { notes } = await notesResponse.json();
-          setNotes(notes);
-        }
+        // Set virtual board immediately
+        setBoard({
+          id: "archive",
+          name: "Archive",
+          description: "Archived notes from all boards",
+        });
       } else {
-        // Fetch current board info
-        const boardResponse = await fetch(`/api/boards/${boardId}`);
-        if (boardResponse.status === 401) {
-          router.push("/auth/signin");
-          return;
-        }
-        if (boardResponse.ok) {
-          const { board } = await boardResponse.json();
-          setBoard(board);
-        }
+        [allBoardsResponse, boardResponse, notesResponse] = await Promise.all([
+          fetch("/api/boards"),
+          fetch(`/api/boards/${boardId}`),
+          fetch(`/api/boards/${boardId}/notes`),
+        ]);
+      }
 
-        // Fetch notes for specific board
-        const notesResponse = await fetch(`/api/boards/${boardId}/notes`);
-        if (notesResponse.ok) {
-          const { notes } = await notesResponse.json();
-          setNotes(notes);
-        }
+      if (allBoardsResponse.ok) {
+        const { boards } = await allBoardsResponse.json();
+        setAllBoards(boards);
+      }
+
+      if (boardResponse && boardResponse.ok) {
+        const { board } = await boardResponse.json();
+        setBoard(board);
+        setBoardSettings({
+          name: board.name,
+          description: board.description || "",
+          isPublic: (board as { isPublic?: boolean })?.isPublic ?? false,
+          sendSlackUpdates: (board as { sendSlackUpdates?: boolean })?.sendSlackUpdates ?? true,
+        });
+      }
+
+      if (notesResponse && notesResponse.ok) {
+        const { notes } = await notesResponse.json();
+        setNotes(notes);
       }
 
       if (boardId && boardId !== "all-notes") {
@@ -767,20 +347,33 @@ export default function BoardPage({
     } catch (error) {
       console.error("Error fetching board data:", error);
     } finally {
-      setLoading(false);
+      setNotesLoading(false);
     }
+  };
+
+  // Adapter: bridge component Note -> existing update handler
+  const handleUpdateNoteFromComponent = async (updatedNote: Note) => {
+    // Find the note to get its board ID for all notes view
+    const currentNote = notes.find((n) => n.id === updatedNote.id);
+    if (!currentNote) return;
+
+    // OPTIMISTIC UPDATE: Update UI immediately
+    setNotes(notes.map((n) => (n.id === updatedNote.id ? updatedNote : n)));
   };
 
   const handleAddNote = async (targetBoardId?: string) => {
     // For all notes view, ensure a board is selected
     if (boardId === "all-notes" && !targetBoardId) {
-      alert("Please select a board to add the note to");
+      setErrorDialog({
+        open: true,
+        title: "Board selection required",
+        description: "Please select a board to add the note to",
+      });
       return;
     }
 
     try {
-      const actualTargetBoardId =
-        boardId === "all-notes" ? targetBoardId : boardId;
+      const actualTargetBoardId = boardId === "all-notes" ? targetBoardId : boardId;
       const isAllNotesView = boardId === "all-notes";
 
       const response = await fetch(
@@ -791,7 +384,7 @@ export default function BoardPage({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            content: "",
+            checklistItems: [],
             ...(isAllNotesView && { boardId: targetBoardId }),
           }),
         }
@@ -800,110 +393,120 @@ export default function BoardPage({
       if (response.ok) {
         const { note } = await response.json();
         setNotes([...notes, note]);
-        setEditingNote(note.id);
-        setEditContent("");
+        setAddingChecklistItem(note.id);
       }
     } catch (error) {
       console.error("Error creating note:", error);
     }
   };
 
-  const handleUpdateNote = async (noteId: string, content: string) => {
-    try {
-      // Find the note to get its board ID for all notes view
-      const currentNote = notes.find((n) => n.id === noteId);
-      const targetBoardId =
-        boardId === "all-notes" && currentNote?.board?.id
-          ? currentNote.board.id
-          : boardId;
+  const handleDeleteNote = (noteId: string) => {
+    const noteToDelete = notes.find((n) => n.id === noteId);
+    if (!noteToDelete) return;
 
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ content }),
-        }
-      );
+    const targetBoardId = noteToDelete.board?.id ?? noteToDelete.boardId;
 
-      if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-        setEditingNote(null);
-        setEditContent("");
-      } else {
-        const errorData = await response.json();
-        alert(errorData.error || "Failed to update note");
-      }
-    } catch (error) {
-      console.error("Error updating note:", error);
-      alert("Failed to update note");
-    }
-  };
+    setNotes((prev) => prev.filter((n) => n.id !== noteId));
 
-  const handleDeleteNote = async (noteId: string) => {
-    if (!confirm("Are you sure you want to delete this note?")) return;
-
-    try {
-      // Find the note to get its board ID for all notes view
-      const currentNote = notes.find((n) => n.id === noteId);
-      const targetBoardId =
-        boardId === "all-notes" && currentNote?.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
+    const timeoutId = setTimeout(async () => {
+      try {
+        const response = await fetch(`/api/boards/${targetBoardId}/notes/${noteId}`, {
           method: "DELETE",
+        });
+        if (!response.ok) {
+          setNotes((prev) => [noteToDelete, ...prev]);
+          const errorData = await response.json().catch(() => null);
+          setErrorDialog({
+            open: true,
+            title: "Failed to delete note",
+            description: errorData?.error || "Failed to delete note",
+          });
         }
-      );
-
-      if (response.ok) {
-        setNotes(notes.filter((n) => n.id !== noteId));
-      } else {
-        const errorData = await response.json();
-        alert(errorData.error || "Failed to delete note");
+      } catch (error) {
+        console.error("Error deleting note:", error);
+        setNotes((prev) => [noteToDelete, ...prev]);
+        setErrorDialog({
+          open: true,
+          title: "Failed to delete note",
+          description: "Failed to delete note",
+        });
+      } finally {
+        delete pendingDeleteTimeoutsRef.current[noteId];
       }
-    } catch (error) {
-      console.error("Error deleting note:", error);
-      alert("Failed to delete note");
-    }
+    }, 4000);
+    pendingDeleteTimeoutsRef.current[noteId] = timeoutId;
+
+    toast("Note deleted", {
+      action: {
+        label: "Undo",
+        onClick: () => {
+          const t = pendingDeleteTimeoutsRef.current[noteId];
+          if (t) {
+            clearTimeout(t);
+            delete pendingDeleteTimeoutsRef.current[noteId];
+          }
+          setNotes((prev) => [noteToDelete, ...prev]);
+        },
+      },
+      duration: 4000,
+    });
   };
 
-  const handleToggleDone = async (noteId: string, currentDone: boolean) => {
+  const handleArchiveNote = async (noteId: string) => {
     try {
-      // Find the note to get its board ID for all notes view
       const currentNote = notes.find((n) => n.id === noteId);
-      const targetBoardId =
-        boardId === "all-notes" && currentNote?.board?.id
-          ? currentNote.board.id
-          : boardId;
+      if (!currentNote) return;
 
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ done: !currentDone }),
-        }
-      );
+      const targetBoardId = currentNote?.board?.id ?? currentNote.boardId;
 
-      if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
+      setNotes(notes.filter((n) => n.id !== noteId));
+
+      const response = await fetch(`/api/boards/${targetBoardId}/notes/${noteId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archivedAt: new Date().toISOString() }),
+      });
+
+      if (!response.ok) {
+        // Revert on error
+        setNotes([...notes, currentNote]);
+        setErrorDialog({
+          open: true,
+          title: "Archive Failed",
+          description: "Failed to archive note. Please try again.",
+        });
       }
     } catch (error) {
-      console.error("Error toggling note done status:", error);
+      console.error("Error archiving note:", error);
     }
   };
+  const handleUnarchiveNote = async (noteId: string) => {
+    try {
+      const currentNote = notes.find((n) => n.id === noteId);
+      if (!currentNote) return;
 
-  const handleSignOut = async () => {
-    await signOut();
+      const targetBoardId = currentNote.board?.id ?? currentNote.boardId;
+      if (!targetBoardId) return;
+
+      setNotes(notes.filter((n) => n.id !== noteId));
+
+      const response = await fetch(`/api/boards/${targetBoardId}/notes/${noteId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archivedAt: null }),
+      });
+
+      if (!response.ok) {
+        setNotes([...notes, currentNote]);
+        setErrorDialog({
+          open: true,
+          title: "Unarchive Failed",
+          description: "Failed to unarchive note. Please try again.",
+        });
+      }
+    } catch (error) {
+      console.error("Error unarchiving note:", error);
+    }
   };
 
   const handleAddBoard = async (e: React.FormEvent) => {
@@ -932,555 +535,228 @@ export default function BoardPage({
         router.push(`/boards/${board.id}`);
       } else {
         const errorData = await response.json();
-        alert(errorData.error || "Failed to create board");
+        setErrorDialog({
+          open: true,
+          title: "Failed to create board",
+          description: errorData.error || "Failed to create board",
+        });
       }
     } catch (error) {
       console.error("Error creating board:", error);
-      alert("Failed to create board");
+      setErrorDialog({
+        open: true,
+        title: "Failed to create board",
+        description: "Failed to create board",
+      });
     }
   };
 
-  // Checklist handlers
-  const handleConvertToChecklist = async (noteId: string) => {
+  const handleUpdateBoardSettings = async (settings: {
+    name?: string;
+    description?: string;
+    isPublic?: boolean;
+    sendSlackUpdates: boolean;
+  }) => {
     try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote) return;
-
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      // Create checklist items from existing content, splitting by newlines
-      const lines = currentNote.content
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-
-      const checklistItems: ChecklistItem[] =
-        lines.length > 0
-          ? lines.map((line, index) => ({
-              id: `item-${Date.now()}-${index}`,
-              content: line,
-              checked: false,
-              order: index,
-            }))
-          : [
-              {
-                id: `item-${Date.now()}`,
-                content: "",
-                checked: false,
-                order: 0,
-              },
-            ];
-
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            isChecklist: true,
-            checklistItems: checklistItems,
-          }),
-        }
-      );
+      const response = await fetch(`/api/boards/${boardId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      });
 
       if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
+        const { board } = await response.json();
+        setBoard(board);
+        setBoardSettings({
+          name: board.name,
+          description: board.description || "",
+          isPublic: (board as { isPublic?: boolean })?.isPublic ?? false,
+          sendSlackUpdates: (board as { sendSlackUpdates?: boolean })?.sendSlackUpdates ?? true,
+        });
+        setBoardSettingsDialog(false);
       }
     } catch (error) {
-      console.error("Error converting to checklist:", error);
+      console.error("Error updating board settings:", error);
     }
   };
 
-  const handleAddChecklistItem = async (noteId: string) => {
-    if (!newChecklistItemContent.trim()) return;
-
+  const handleCopyPublicUrl = async () => {
+    const publicUrl = `${window.location.origin}/public/boards/${boardId}`;
     try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote) return;
+      await navigator.clipboard.writeText(publicUrl);
+      setCopiedPublicUrl(true);
+      setTimeout(() => setCopiedPublicUrl(false), 2000);
+    } catch (error) {
+      console.error("Failed to copy URL:", error);
+    }
+  };
 
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      const newItem: ChecklistItem = {
-        id: `item-${Date.now()}`,
-        content: newChecklistItemContent,
-        checked: false,
-        order: (currentNote.checklistItems || []).length,
-      };
-
-      const updatedItems = [...(currentNote.checklistItems || []), newItem];
-
-      // Check if all items are checked to mark note as done
-      const allItemsChecked = updatedItems.every((item) => item.checked);
-
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            checklistItems: updatedItems,
-            done: allItemsChecked,
-          }),
-        }
-      );
+  const handleDeleteBoard = async () => {
+    try {
+      const response = await fetch(`/api/boards/${boardId}`, {
+        method: "DELETE",
+      });
 
       if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-        setNewChecklistItemContent("");
-        // Keep addingChecklistItem active so user can continue adding items
-        // setAddingChecklistItem(null) - removed this line
+        router.push("/dashboard");
+      } else {
+        const errorData = await response.json();
+        setErrorDialog({
+          open: true,
+          title: "Failed to delete board",
+          description: errorData.error || "Failed to delete board",
+        });
       }
     } catch (error) {
-      console.error("Error adding checklist item:", error);
+      console.error("Error deleting board:", error);
+      setErrorDialog({
+        open: true,
+        title: "Failed to delete board",
+        description: "Failed to delete board",
+      });
     }
+    setDeleteConfirmDialog(false);
   };
 
-  const handleToggleChecklistItem = async (noteId: string, itemId: string) => {
-    try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote || !currentNote.checklistItems) return;
-
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      const updatedItems = currentNote.checklistItems.map((item) =>
-        item.id === itemId ? { ...item, checked: !item.checked } : item
-      );
-
-      // Add item to animating set for visual feedback
-      setAnimatingItems((prev) => new Set([...prev, itemId]));
-
-      // Small delay to show animation before reordering
-      setTimeout(() => {
-        // Sort items: unchecked first, then checked
-        const sortedItems = [
-          ...updatedItems
-            .filter((item) => !item.checked)
-            .sort((a, b) => a.order - b.order),
-          ...updatedItems
-            .filter((item) => item.checked)
-            .sort((a, b) => a.order - b.order),
-        ];
-
-        // Check if all items are checked to mark note as done
-        const allItemsChecked = sortedItems.every((item) => item.checked);
-
-        fetch(`/api/boards/${targetBoardId}/notes/${noteId}`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            checklistItems: sortedItems,
-            done: allItemsChecked,
-          }),
-        })
-          .then((response) => response.json())
-          .then(({ note }) => {
-            setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-            // Remove from animating set after update
-            setAnimatingItems((prev) => {
-              const newSet = new Set(prev);
-              newSet.delete(itemId);
-              return newSet;
-            });
-          });
-      }, 200);
-    } catch (error) {
-      console.error("Error toggling checklist item:", error);
-    }
-  };
-
-  const handleDeleteChecklistItem = async (noteId: string, itemId: string) => {
-    try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote || !currentNote.checklistItems) return;
-
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      const updatedItems = currentNote.checklistItems.filter(
-        (item) => item.id !== itemId
-      );
-
-      // Check if all remaining items are checked to mark note as done
-      const allItemsChecked =
-        updatedItems.length > 0
-          ? updatedItems.every((item) => item.checked)
-          : false;
-
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            checklistItems: updatedItems,
-            done: allItemsChecked,
-          }),
-        }
-      );
-
-      if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-      }
-    } catch (error) {
-      console.error("Error deleting checklist item:", error);
-    }
-  };
-
-  const handleEditChecklistItem = async (
-    noteId: string,
-    itemId: string,
-    content: string
-  ) => {
-    try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote || !currentNote.checklistItems) return;
-
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      const updatedItems = currentNote.checklistItems.map((item) =>
-        item.id === itemId ? { ...item, content } : item
-      );
-
-      // Check if all items are checked to mark note as done
-      const allItemsChecked = updatedItems.every((item) => item.checked);
-
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            checklistItems: updatedItems,
-            done: allItemsChecked,
-          }),
-        }
-      );
-
-      if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-        setEditingChecklistItem(null);
-        setEditingChecklistItemContent("");
-      }
-    } catch (error) {
-      console.error("Error editing checklist item:", error);
-    }
-  };
-
-  const handleToggleAllChecklistItems = async (noteId: string) => {
-    try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote || !currentNote.checklistItems) return;
-
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      // Check if all items are checked
-      const allChecked = currentNote.checklistItems.every(
-        (item) => item.checked
-      );
-
-      // Toggle all items to opposite state
-      const updatedItems = currentNote.checklistItems.map((item) => ({
-        ...item,
-        checked: !allChecked,
-      }));
-
-      // Sort items: unchecked first, then checked
-      const sortedItems = [
-        ...updatedItems
-          .filter((item) => !item.checked)
-          .sort((a, b) => a.order - b.order),
-        ...updatedItems
-          .filter((item) => item.checked)
-          .sort((a, b) => a.order - b.order),
-      ];
-
-      // The note should be marked as done if all items are checked
-      const noteIsDone = !allChecked; // If all were checked before, we're unchecking them (note becomes undone)
-      // If not all were checked before, we're checking them all (note becomes done)
-
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            checklistItems: sortedItems,
-            done: noteIsDone,
-          }),
-        }
-      );
-
-      if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-      }
-    } catch (error) {
-      console.error("Error toggling all checklist items:", error);
-    }
-  };
-
-  const handleSplitChecklistItem = async (
-    noteId: string,
-    itemId: string,
-    content: string,
-    cursorPosition: number
-  ) => {
-    try {
-      const currentNote = notes.find((n) => n.id === noteId);
-      if (!currentNote || !currentNote.checklistItems) return;
-
-      const targetBoardId =
-        boardId === "all-notes" && currentNote.board?.id
-          ? currentNote.board.id
-          : boardId;
-
-      const firstHalf = content.substring(0, cursorPosition).trim();
-      const secondHalf = content.substring(cursorPosition).trim();
-
-      if (!secondHalf) {
-        await handleEditChecklistItem(noteId, itemId, firstHalf);
-
-        const currentItem = currentNote.checklistItems.find(
-          (item) => item.id === itemId
-        );
-        const currentOrder = currentItem?.order || 0;
-
-        const newItem = {
-          id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-          content: "",
-          checked: false,
-          order: currentOrder + 0.5,
-        };
-
-        const allItems = [...currentNote.checklistItems, newItem].sort(
-          (a, b) => a.order - b.order
-        );
-
-        const response = await fetch(
-          `/api/boards/${targetBoardId}/notes/${noteId}`,
-          {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              checklistItems: allItems,
-            }),
-          }
-        );
-
-        if (response.ok) {
-          const { note } = await response.json();
-          setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-          setEditingChecklistItem({ noteId, itemId: newItem.id });
-          setEditingChecklistItemContent("");
-        }
-        return;
-      }
-
-      // Update current item with first half
-      const updatedItems = currentNote.checklistItems.map((item) =>
-        item.id === itemId ? { ...item, content: firstHalf } : item
-      );
-
-      // Find the current item's order to insert new item after it
-      const currentItem = currentNote.checklistItems.find(
-        (item) => item.id === itemId
-      );
-      const currentOrder = currentItem?.order || 0;
-
-      // Create new item with second half
-      const newItem = {
-        id: `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        content: secondHalf,
-        checked: false,
-        order: currentOrder + 0.5,
-      };
-
-      const allItems = [...updatedItems, newItem].sort(
-        (a, b) => a.order - b.order
-      );
-
-      // Update the note with both changes
-      const response = await fetch(
-        `/api/boards/${targetBoardId}/notes/${noteId}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            checklistItems: allItems,
-          }),
-        }
-      );
-
-      if (response.ok) {
-        const { note } = await response.json();
-        setNotes(notes.map((n) => (n.id === noteId ? note : n)));
-        setEditingChecklistItem({ noteId, itemId: newItem.id });
-        setEditingChecklistItemContent(secondHalf);
-      }
-    } catch (error) {
-      console.error("Error splitting checklist item:", error);
-    }
-  };
-
-  if (loading) {
+  if (userLoading || notesloading) {
     return <FullPageLoader message="Loading board..." />;
   }
 
-  if (!board && boardId !== "all-notes") {
+  if (!board && boardId !== "all-notes" && boardId !== "archive") {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-lg">Board not found</div>
+        <div className="text-center">
+          <h1 className="text-2xl font-bold mb-2">Board not found</h1>
+          <Button asChild>
+            <Link href="/">Go to Gumboard</Link>
+          </Button>
+        </div>
       </div>
     );
   }
 
-  const layoutNotes = isMobile
-    ? calculateMobileLayout()
-    : calculateGridLayout();
-
-  // Calculate the total height needed for the board area
-  const calculateBoardHeight = () => {
-    if (layoutNotes.length === 0) {
-      return "calc(100vh - 64px)"; // Default minimum height when no notes
-    }
-
-    // Find the bottommost note position
-    const maxBottom = Math.max(
-      ...layoutNotes.map((note) => note.y + note.height)
-    );
-    const minHeight =
-      typeof window !== "undefined" && window.innerWidth < 768 ? 500 : 600; // Different min heights for mobile/desktop
-    const calculatedHeight = Math.max(minHeight, maxBottom + 100); // Add 100px padding at bottom
-
-    return `${calculatedHeight}px`;
-  };
-
   return (
-    <div className="min-h-screen max-w-screen bg-background dark:bg-zinc-950">
-      <div className="bg-card dark:bg-zinc-900 border-b border-border dark:border-zinc-800 shadow-sm">
-        <div className="flex justify-between items-center h-16">
-          <div className="flex items-center space-x-3">
+    <div className="min-h-screen max-w-screen bg-zinc-100 dark:bg-zinc-800 bg-dots">
+      <div>
+        <div className="mx-2 flex flex-wrap sm:flex-nowrap justify-between items-center h-auto sm:h-16 p-2 sm:p-0">
+          <div className="bg-white dark:bg-zinc-900 shadow-sm border border-zinc-100 rounded-lg dark:border-zinc-800 mt-2 py-2 px-3 flex flex-wrap sm:flex-nowrap items-center sm:space-x-3 w-full sm:w-auto">
             {/* Company Name */}
-            <Link
-              href="/dashboard"
-              className="flex-shrink-0 pl-4 sm:pl-2 lg:pl-4"
-            >
-              <h1 className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+            <Link href="/dashboard" className="flex-shrink-0 pl-1">
+              <h1 className="text-xl font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-3">
                 Gumboard
+                <BetaBadge />
               </h1>
             </Link>
-
+            <div className="h-6 w-px m-1.5 bg-zinc-100 dark:bg-zinc-700" />
             {/* Board Selector Dropdown */}
-            <div className="relative board-dropdown hidden md:block">
-              <button
+            <div className="relative board-dropdown flex-1 mr-0 sm:flex-none">
+              <Button
                 onClick={() => setShowBoardDropdown(!showBoardDropdown)}
-                className="flex items-center border border-border dark:border-zinc-800 space-x-2 text-foreground dark:text-zinc-100 hover:text-foreground dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-zinc-600 rounded-md px-3 py-2 cursor-pointer"
+                className={`flex items-center justify-between ${showBoardDropdown ? "bg-zinc-100 dark:bg-zinc-800" : "hover:bg-zinc-100 dark:hover:bg-zinc-800"} text-foreground dark:text-zinc-100 hover:text-foreground dark:hover:text-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-600 dark:focus-visible:ring-sky-600 rounded-lg px-2 py-2 cursor-pointer w-full sm:w-auto`}
               >
                 <div>
                   <div className="text-sm font-semibold text-foreground dark:text-zinc-100">
-                    {boardId === "all-notes" ? "All notes" : board?.name}
+                    {boardId === "all-notes"
+                      ? "All notes"
+                      : boardId === "archive"
+                        ? "Archive"
+                        : board?.name}
                   </div>
                 </div>
                 <ChevronDown
-                  className={`w-4 h-4 text-muted-foreground dark:text-zinc-400 transition-transform ${
-                    showBoardDropdown ? "rotate-180" : ""
-                  }`}
+                  className={`w-4 h-4 text-muted-foreground dark:text-zinc-400 transition-transform }`}
                 />
-              </button>
+              </Button>
 
               {showBoardDropdown && (
-                <div className="absolute left-0 mt-2 w-64 bg-white dark:bg-zinc-900 rounded-md shadow-lg border border-border dark:border-zinc-800 z-50 max-h-80 overflow-y-auto">
-                  <div className="py-1">
-                    {/* All Notes Option */}
-                    <Link
-                      href="/boards/all-notes"
-                      className={`block px-4 py-2 text-sm hover:bg-accent dark:hover:bg-zinc-800 ${
-                        boardId === "all-notes"
-                          ? "bg-blue-50 dark:bg-zinc-900/70 text-blue-700 dark:text-blue-300"
-                          : "text-foreground dark:text-zinc-100"
-                      }`}
-                      onClick={() => setShowBoardDropdown(false)}
-                    >
-                      <div className="font-medium">All notes</div>
-                      <div className="text-xs text-muted-foreground dark:text-zinc-400 mt-1">
-                        Notes from all boards
-                      </div>
-                    </Link>
-                    {allBoards.length > 0 && (
-                      <div className="border-t border-border dark:border-zinc-800 my-1"></div>
-                    )}
+                <div className="fixed sm:absolute left-0 mt-1 w-full sm:w-64 bg-white dark:bg-zinc-900 rounded-lg shadow-lg border border-zinc-100 dark:border-zinc-800 z-50 max-h-80 overflow-y-auto">
+                  <div className="p-2 flex flex-col gap-1">
+                    {/* Boards */}
                     {allBoards.map((b) => (
                       <Link
                         key={b.id}
                         href={`/boards/${b.id}`}
-                        className={`block px-4 py-2 text-sm hover:bg-accent dark:hover:bg-zinc-800 ${
+                        className={`rounded-lg block font-medium px-3 py-1.5 text-sm hover:text-white hover:bg-sky-600 dark:hover:bg-sky-600  dark:hover:text-white ${
                           b.id === boardId
-                            ? "bg-blue-50 dark:bg-zinc-900/70 text-blue-700 dark:text-blue-300"
+                            ? "bg-zinc-100 dark:bg-zinc-800 text-foreground dark:text-zinc-100 font-semibold"
                             : "text-foreground dark:text-zinc-100"
                         }`}
                         onClick={() => setShowBoardDropdown(false)}
                       >
-                        <div className="font-medium">{b.name}</div>
-                        {b.description && (
-                          <div className="text-xs text-muted-foreground dark:text-zinc-400 mt-1">
-                            {b.description}
-                          </div>
-                        )}
+                        <div>{b.name}</div>
                       </Link>
                     ))}
+
                     {allBoards.length > 0 && (
-                      <div className="border-t border-border dark:border-zinc-800 my-1"></div>
+                      <div className="border-t border-zinc-100 dark:border-zinc-800 my-1"></div>
                     )}
-                    <button
+
+                    {/* All Notes Option */}
+                    <Link
+                      href="/boards/all-notes"
+                      className={`rounded-lg font-medium block px-3 py-1.5 text-sm hover:text-white hover:bg-sky-600 dark:hover:bg-sky-600 ${
+                        boardId === "all-notes"
+                          ? "bg-zinc-100 dark:bg-zinc-800 dark:text-white font-semibold"
+                          : "text-foreground dark:text-white"
+                      }`}
+                      onClick={() => setShowBoardDropdown(false)}
+                    >
+                      <div>All notes</div>
+                    </Link>
+
+                    {/* Archive Option */}
+                    <Link
+                      href="/boards/archive"
+                      className={`rounded-lg block font-medium px-3 py-1.5 text-sm hover:text-white hover:bg-sky-600 dark:hover:bg-sky-600 ${
+                        boardId === "archive"
+                          ? "bg-zinc-100 dark:bg-zinc-800 dark:text-white font-semibold"
+                          : "text-foreground dark:text-white"
+                      }`}
+                      onClick={() => setShowBoardDropdown(false)}
+                    >
+                      <div>All archived</div>
+                    </Link>
+                    <div className="border-t border-zinc-100 dark:border-zinc-800 my-1"></div>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => {
                         setShowAddBoard(true);
                         setShowBoardDropdown(false);
                       }}
-                      className="flex items-center w-full px-4 py-2 text-sm text-foreground dark:text-zinc-100 hover:bg-accent dark:hover:bg-zinc-800"
+                      className="flex items-center w-full px-4 py-2"
                     >
-                      <Plus className="w-4 h-4 mr-2" />
                       <span className="font-medium">Create new board</span>
-                    </button>
+                    </Button>
+                    {boardId !== "all-notes" && boardId !== "archive" && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setBoardSettings({
+                            name: board?.name || "",
+                            description: board?.description || "",
+                            isPublic: (board as { isPublic?: boolean })?.isPublic ?? false,
+                            sendSlackUpdates:
+                              (board as { sendSlackUpdates?: boolean })?.sendSlackUpdates ?? true,
+                          });
+                          setBoardSettingsDialog(true);
+                          setShowBoardDropdown(false);
+                        }}
+                        className="flex items-center w-full px-4 py-2"
+                      >
+                        <Settings className="w-4 h-4 mr-2" />
+                        <span className="font-medium">Board settings</span>
+                      </Button>
+                    )}
                   </div>
                 </div>
               )}
             </div>
+            <div className="h-6 w-px m-1.5 bg-zinc-100 dark:bg-zinc-700" />
 
             {/* Filter Popover */}
-            <div className="hidden md:block">
+            <div className="relative board-dropdown mr-0" data-slot="filter-popover">
               <FilterPopover
                 startDate={dateRange.startDate}
                 endDate={dateRange.endDate}
@@ -1495,43 +771,39 @@ export default function BoardPage({
                   setSelectedAuthor(authorId);
                   updateURL(undefined, undefined, authorId);
                 }}
-                showCompleted={showDoneNotes}
-                onShowCompletedChange={(show) => {
-                  setShowDoneNotes(show);
-                  updateURL(undefined, undefined, undefined, show);
-                }}
-                className="min-w-fit"
+                className="w-fit"
               />
             </div>
           </div>
 
           {/* Right side - Search, Add Note and User dropdown */}
-          <div className="flex items-center space-x-2 px-3 ">
+          <div className="bg-white dark:bg-zinc-900 shadow-sm border border-zinc-100 rounded-lg dark:border-zinc-800 mt-2 py-2 px-3 flex flex-wrap sm:flex-nowrap items-center sm:space-x-3 w-full sm:w-auto gap-2 md:gap-0">
             {/* Search Box */}
-            <div className="relative hidden sm:block">
+            <div className="relative flex-1 sm:flex-none min-w-[150px]">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <Search className="h-4 w-4 text-muted-foreground dark:text-zinc-400" />
               </div>
               <input
+                aria-label="Search notes"
                 type="text"
                 placeholder="Search notes..."
                 value={searchTerm}
                 onChange={(e) => {
                   setSearchTerm(e.target.value);
-                  updateURL(e.target.value);
                 }}
-                className="w-64 pl-10 pr-4 py-2 border border-border dark:border-zinc-800 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-zinc-600 focus:border-transparent text-sm bg-background dark:bg-zinc-900 text-foreground dark:text-zinc-100 placeholder:text-muted-foreground dark:placeholder:text-zinc-400"
+                className="w-full sm:w-64 pl-10 pr-8 py-2 border border-zinc-100 dark:border-zinc-800 rounded-md focus:outline-none focus:ring-2 focus:ring-sky-600 dark:focus:ring-sky-600 focus:border-transparent text-sm bg-background dark:bg-zinc-900 text-foreground dark:text-zinc-100 placeholder:text-muted-foreground dark:placeholder:text-zinc-400"
               />
               {searchTerm && (
-                <button
+                <Button
                   onClick={() => {
                     setSearchTerm("");
+                    setDebouncedSearchTerm("");
                     updateURL("");
                   }}
-                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-muted-foreground dark:text-zinc-400 hover:text-foreground dark:hover:text-zinc-100"
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-muted-foreground dark:text-zinc-400 hover:text-foreground dark:hover:text-zinc-100 cursor-pointer"
                 >
-                  ×
-                </button>
+                  <X className="h-4 w-4" />
+                </Button>
               )}
             </div>
 
@@ -1543,614 +815,57 @@ export default function BoardPage({
                   handleAddNote();
                 }
               }}
-              className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white shadow-lg hover:shadow-xl transition-all duration-200 cursor-pointer font-medium"
+              className="flex items-center justify-center text-white w-fit h-10 sm:w-auto sm:h-auto sm:space-x-2 bg-sky-600 hover:bg-sky-500 transition-all duration-200 cursor-pointer font-medium"
             >
-              <Pencil className="w-4 h-4" />
+              <span>Add note</span>
             </Button>
 
             {/* User Dropdown */}
-            <div className="relative user-dropdown">
-              <button
-                onClick={() => setShowUserDropdown(!showUserDropdown)}
-                className="flex items-center space-x-2 text-foreground dark:text-gray-200 hover:text-foreground dark:hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:ring-offset-2 dark:focus:ring-offset-gray-800 rounded-md px-2 py-1"
-              >
-                <div className="w-8 h-8 bg-blue-500 dark:bg-blue-600 rounded-full flex items-center justify-center">
-                  <span className="text-sm font-medium text-white">
-                    {user?.name
-                      ? user.name.charAt(0).toUpperCase()
-                      : user?.email?.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-                <span className="text-sm font-medium hidden md:inline">
-                  {user?.name?.split(" ")[0] || "User"}
-                </span>
-                <ChevronDown
-                  className={`w-4 h-4 text-muted-foreground dark:text-gray-400 transition-transform ${
-                    showUserDropdown ? "rotate-180" : ""
-                  }`}
-                />
-              </button>
-
-              {showUserDropdown && (
-                <div className="absolute right-0 mt-2 min-w-fit bg-white dark:bg-gray-800 rounded-md shadow-lg border border-border dark:border-gray-600 z-50">
-                  <div className="py-1">
-                    <div className="px-4 py-2 text-sm text-muted-foreground dark:text-gray-400 border-b border-border dark:border-gray-600">
-                      {user?.email}
-                    </div>
-                    <Link
-                      href="/settings"
-                      className="flex items-center px-4 py-2 text-sm text-foreground dark:text-gray-200 hover:bg-accent dark:hover:bg-gray-700"
-                      onClick={() => setShowUserDropdown(false)}
-                    >
-                      <Settings className="w-4 h-4 mr-2" />
-                      Settings
-                    </Link>
-                    <button
-                      onClick={handleSignOut}
-                      className="flex items-center w-full px-4 py-2 text-sm text-foreground dark:text-gray-200 hover:bg-accent dark:hover:bg-gray-700"
-                    >
-                      <LogOut className="w-4 h-4 mr-2" />
-                      Sign Out
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+            <ProfileDropdown user={user} />
           </div>
         </div>
       </div>
 
-      {/* Mobile Board Title */}
-      <div className="md:hidden bg-card dark:bg-gray-800 border-b border-border dark:border-gray-700 px-4 py-3 space-y-3">
-        <div>
-          <h2 className="text-lg font-semibold text-foreground dark:text-gray-200">
-            {boardId === "all-notes" ? "All notes" : board?.name}
-          </h2>
-          {boardId === "all-notes" ? (
-            <p className="text-sm text-muted-foreground dark:text-gray-400">
-              Notes from all boards
-            </p>
-          ) : (
-            board?.description && (
-              <p className="text-sm text-muted-foreground dark:text-gray-400">
-                {board.description}
-              </p>
-            )
-          )}
-        </div>
-
-        {/* Mobile Search Box */}
-        <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search className="h-4 w-4 text-muted-foreground dark:text-gray-400" />
-          </div>
-          <input
-            type="text"
-            placeholder="Search notes..."
-            value={searchTerm}
-            onChange={(e) => {
-              setSearchTerm(e.target.value);
-              updateURL(e.target.value);
-            }}
-            className="w-full pl-10 pr-4 py-2 border border-border dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400 focus:border-transparent text-sm bg-background dark:bg-gray-700 text-foreground dark:text-gray-200 placeholder:text-muted-foreground dark:placeholder:text-gray-400 shadow-sm"
-          />
-          {searchTerm && (
-            <button
-              onClick={() => {
-                setSearchTerm("");
-                updateURL("");
-              }}
-              className="absolute inset-y-0 right-0 pr-3 flex items-center text-muted-foreground dark:text-gray-400 hover:text-foreground dark:hover:text-gray-200"
-            >
-              ×
-            </button>
-          )}
-        </div>
-
-        {/* Mobile Filter Popover */}
-        <div className="md:hidden">
-          <FilterPopover
-            startDate={dateRange.startDate}
-            endDate={dateRange.endDate}
-            onDateRangeChange={(startDate, endDate) => {
-              const newDateRange = { startDate, endDate };
-              setDateRange(newDateRange);
-              updateURL(undefined, newDateRange);
-            }}
-            selectedAuthor={selectedAuthor}
-            authors={uniqueAuthors}
-            onAuthorChange={(authorId) => {
-              setSelectedAuthor(authorId);
-              updateURL(undefined, undefined, authorId);
-            }}
-            showCompleted={showDoneNotes}
-            onShowCompletedChange={(show) => {
-              setShowDoneNotes(show);
-              updateURL(undefined, undefined, undefined, show);
-            }}
-            className="w-full"
-          />
-        </div>
-      </div>
       {/* Board Area */}
       <div
         ref={boardRef}
-        className="relative w-full bg-gray-50 dark:bg-zinc-950"
+        className="relative w-full"
         style={{
-          height: calculateBoardHeight(),
+          height: boardHeight,
           minHeight: "calc(100vh - 64px)", // Account for header height
         }}
       >
-        {/* Search Results Info */}
-        {(searchTerm ||
-          dateRange.startDate ||
-          dateRange.endDate ||
-          selectedAuthor ||
-          showDoneNotes) && (
-          <div className="px-4 py-2 bg-blue-50 dark:bg-blue-900/50 border-b border-blue-100 dark:border-blue-800 text-sm text-blue-700 dark:text-blue-300">
-            <div className="flex flex-wrap items-center gap-2">
-              <span>
-                {filteredNotes.length === 1
-                  ? `1 note found`
-                  : `${filteredNotes.length} notes found`}
-              </span>
-              {searchTerm && (
-                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-800/50 text-blue-800 dark:text-blue-200">
-                  Search: &quot;{searchTerm}&quot;
-                </span>
-              )}
-              {selectedAuthor && (
-                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-800/50 text-blue-800 dark:text-blue-200">
-                  Author:{" "}
-                  {uniqueAuthors.find((a) => a.id === selectedAuthor)?.name ||
-                    "Unknown"}
-                </span>
-              )}
-              {(dateRange.startDate || dateRange.endDate) && (
-                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-800/50 text-blue-800 dark:text-blue-200">
-                  Date:{" "}
-                  {dateRange.startDate
-                    ? dateRange.startDate.toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                      })
-                    : "..."}{" "}
-                  -{" "}
-                  {dateRange.endDate
-                    ? dateRange.endDate.toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                      })
-                    : "..."}
-                </span>
-              )}
-              {showDoneNotes && (
-                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 dark:bg-blue-800/50 text-blue-800 dark:text-blue-200">
-                  Completed notes shown
-                </span>
-              )}
-              <button
-                onClick={() => {
-                  setSearchTerm("");
-                  setDateRange({ startDate: null, endDate: null });
-                  setSelectedAuthor(null);
-                  setShowDoneNotes(false);
-                  updateURL(
-                    "",
-                    { startDate: null, endDate: null },
-                    null,
-                    false
-                  );
-                }}
-                className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 text-xs underline"
-              >
-                Clear all filters
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Notes */}
         <div className="relative w-full h-full">
           {layoutNotes.map((note) => (
-            <div
+            <NoteCard
               key={note.id}
-              className={`absolute rounded-lg shadow-lg select-none group transition-all duration-200 flex flex-col border border-gray-200 dark:border-gray-600 box-border ${
-                note.done ? "opacity-80" : ""
-              }`}
+              note={note as Note}
+              currentUser={user as User}
+              onUpdate={handleUpdateNoteFromComponent}
+              onDelete={handleDeleteNote}
+              onArchive={boardId !== "archive" ? handleArchiveNote : undefined}
+              onUnarchive={boardId === "archive" ? handleUnarchiveNote : undefined}
+              showBoardName={boardId === "all-notes" || boardId === "archive"}
+              className="shadow-md shadow-black/10"
               style={{
-                backgroundColor:
-                  typeof window !== "undefined" &&
-                  window.matchMedia &&
-                  window.matchMedia("(prefers-color-scheme: dark)").matches
-                    ? `${note.color}20`
-                    : note.color,
+                position: "absolute",
                 left: note.x,
                 top: note.y,
                 width: note.width,
                 height: note.height,
                 padding: `${getResponsiveConfig().notePadding}px`,
+                backgroundColor: resolvedTheme === "dark" ? "#18181B" : note.color,
               }}
-              onClick={() => {
-                // Allow editing if user is the note author or admin
-                if (user?.id === note.user.id || user?.isAdmin) {
-                  setEditingNote(note.id);
-                  setEditContent(note.content);
-                }
-              }}
-            >
-              {/* User Info Header */}
-              <div className="flex items-start justify-between mb-4 flex-shrink-0">
-                <div className="flex items-center space-x-2">
-                  <div className="w-7 h-7 bg-white bg-opacity-40 dark:bg-gray-800 dark:bg-opacity-40 rounded-full flex items-center justify-center shadow-sm">
-                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">
-                      {note.user.name
-                        ? note.user.name.charAt(0).toUpperCase()
-                        : note.user.email.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="text-sm font-bold text-gray-700 dark:text-gray-200 truncate max-w-20">
-                      {note.user.name
-                        ? note.user.name.split(" ")[0]
-                        : note.user.email.split("@")[0]}
-                    </span>
-                    <div className="flex flex-col">
-                      {!note.isChecklist && (
-                        <span className="text-xs text-gray-500 dark:text-gray-400 opacity-70">
-                          {new Date(note.createdAt).toLocaleDateString(
-                            "en-US",
-                            {
-                              month: "short",
-                              day: "numeric",
-                              year:
-                                new Date(note.createdAt).getFullYear() !==
-                                new Date().getFullYear()
-                                  ? "numeric"
-                                  : undefined,
-                            }
-                          )}
-                        </span>
-                      )}
-                      {boardId === "all-notes" && note.board && (
-                        <span className="text-xs text-blue-600 dark:text-blue-400 opacity-80 font-medium truncate max-w-20">
-                          {note.board.name}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center space-x-2">
-                  {/* Show edit/delete buttons for note author or admin */}
-                  {(user?.id === note.user.id || user?.isAdmin) && (
-                    <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      {!note.isChecklist && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingNote(note.id);
-                            setEditContent(note.content);
-                          }}
-                          className="p-1 text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 rounded"
-                        >
-                          <Edit3 className="w-3 h-3" />
-                        </button>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteNote(note.id);
-                        }}
-                        className="p-1 text-gray-600 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  )}
-                  {/* Beautiful checkbox for done status - show to author or admin */}
-                  {(user?.id === note.user.id || user?.isAdmin) && (
-                    <div className="flex items-center">
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          if (note.isChecklist) {
-                            handleToggleAllChecklistItems(note.id);
-                          } else {
-                            handleToggleDone(note.id, note.done);
-                          }
-                        }}
-                        className={`
-                          relative w-5 h-5 rounded-md border-2 transition-all duration-200 flex items-center justify-center cursor-pointer hover:scale-110 z-10
-                          ${
-                            note.done
-                              ? "bg-green-500 dark:bg-green-600 border-green-500 dark:border-green-600 text-white shadow-lg opacity-100"
-                              : "bg-white dark:bg-gray-800 bg-opacity-60 dark:bg-opacity-60 border-gray-400 dark:border-gray-500 hover:border-green-400 dark:hover:border-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 opacity-30 group-hover:opacity-100"
-                          }
-                        `}
-                        title={
-                          note.isChecklist
-                            ? note.done
-                              ? "Uncheck all items"
-                              : "Check all items"
-                            : note.done
-                              ? "Mark as not done"
-                              : "Mark as done"
-                        }
-                        type="button"
-                        style={{ pointerEvents: "auto" }}
-                      >
-                        {note.done && (
-                          <svg
-                            className="w-3 h-3 text-white"
-                            fill="none"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                          >
-                            <path d="M5 13l4 4L19 7"></path>
-                          </svg>
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {editingNote === note.id && !note.isChecklist ? (
-                <div className="flex-1 min-h-0">
-                  <textarea
-                    value={editContent}
-                    onChange={(e) => {
-                      const newValue = e.target.value;
-                      setEditContent(newValue);
-
-                      if (newValue.includes("[ ]") && !note.isChecklist) {
-                        handleConvertToChecklist(note.id);
-                      }
-                    }}
-                    className="w-full h-full p-2 bg-transparent border-none resize-none focus:outline-none text-base leading-7 text-gray-800 dark:text-gray-200"
-                    placeholder="Enter note content..."
-                    onBlur={() => handleUpdateNote(note.id, editContent)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && e.ctrlKey) {
-                        handleUpdateNote(note.id, editContent);
-                      }
-                      if (e.key === "Escape") {
-                        setEditingNote(null);
-                        setEditContent("");
-                      }
-                      if (e.key === "Backspace" && editContent.trim() === "") {
-                        handleDeleteNote(note.id);
-                      }
-                    }}
-                    onFocus={(e) => {
-                      // Set cursor at the end of the text
-                      const length = e.target.value.length;
-                      e.target.setSelectionRange(length, length);
-                    }}
-                    autoFocus
-                  />
-                </div>
-              ) : note.isChecklist ? (
-                <div className="flex-1 overflow-hidden flex flex-col space-y-1">
-                  {/* Checklist Items */}
-                  {note.checklistItems?.map((item) => (
-                    <div
-                      key={item.id}
-                      className={`flex items-center group/item hover:bg-white dark:hover:bg-gray-800 hover:bg-opacity-40 dark:hover:bg-opacity-40 rounded pr-3 py-1 -ml-0 -mr-0 transition-all duration-200 ${
-                        animatingItems.has(item.id) ? "animate-pulse" : ""
-                      }`}
-                    >
-                      {/* Checkbox */}
-                      <button
-                        onClick={() =>
-                          handleToggleChecklistItem(note.id, item.id)
-                        }
-                        className={`
-                          relative w-4 h-4 rounded border-2 transition-all duration-200 flex items-center justify-center cursor-pointer hover:scale-110 mr-3 flex-shrink-0 ml-2
-                          ${
-                            item.checked
-                              ? "bg-green-500 dark:bg-green-600 border-green-500 dark:border-green-600 text-white"
-                              : "bg-white dark:bg-gray-800 bg-opacity-60 dark:bg-opacity-60 border-gray-400 dark:border-gray-500 hover:border-green-400 dark:hover:border-green-500"
-                          }
-                        `}
-                      >
-                        {item.checked && (
-                          <svg
-                            className="w-3 h-3 text-white"
-                            fill="none"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                          >
-                            <path d="M5 13l4 4L19 7"></path>
-                          </svg>
-                        )}
-                      </button>
-
-                      {/* Content */}
-                      {editingChecklistItem?.noteId === note.id &&
-                      editingChecklistItem?.itemId === item.id ? (
-                        <input
-                          type="text"
-                          value={editingChecklistItemContent}
-                          onChange={(e) =>
-                            setEditingChecklistItemContent(e.target.value)
-                          }
-                          className="flex-1 bg-transparent border-none outline-none text-sm leading-6 text-gray-800 dark:text-gray-200"
-                          onBlur={() =>
-                            handleEditChecklistItem(
-                              note.id,
-                              item.id,
-                              editingChecklistItemContent
-                            )
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              const target = e.target as HTMLInputElement;
-                              const cursorPosition = target.selectionStart || 0;
-                              handleSplitChecklistItem(
-                                note.id,
-                                item.id,
-                                editingChecklistItemContent,
-                                cursorPosition
-                              );
-                            }
-                            if (e.key === "Escape") {
-                              setEditingChecklistItem(null);
-                              setEditingChecklistItemContent("");
-                            }
-                            if (
-                              e.key === "Backspace" &&
-                              editingChecklistItemContent.trim() === ""
-                            ) {
-                              handleDeleteChecklistItem(note.id, item.id);
-                            }
-                          }}
-                          autoFocus
-                        />
-                      ) : (
-                        <span
-                          className={`flex-1 text-sm leading-6 cursor-pointer ${
-                            item.checked
-                              ? "text-gray-500 dark:text-gray-400 line-through opacity-70"
-                              : "text-gray-800 dark:text-gray-200"
-                          }`}
-                          onClick={() => {
-                            if (user?.id === note.user.id || user?.isAdmin) {
-                              setEditingChecklistItem({
-                                noteId: note.id,
-                                itemId: item.id,
-                              });
-                              setEditingChecklistItemContent(item.content);
-                            }
-                          }}
-                        >
-                          {item.content}
-                        </span>
-                      )}
-
-                      {/* Delete button */}
-                      {(user?.id === note.user.id || user?.isAdmin) && (
-                        <button
-                          onClick={() =>
-                            handleDeleteChecklistItem(note.id, item.id)
-                          }
-                          className="opacity-0 group-hover/item:opacity-100 transition-opacity p-1 text-gray-600 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 rounded ml-2"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      )}
-                    </div>
-                  ))}
-
-                  {/* Add new item input */}
-                  {addingChecklistItem === note.id && (
-                    <div className="flex items-center group/item hover:bg-white dark:hover:bg-gray-800 hover:bg-opacity-40 dark:hover:bg-opacity-40 rounded-2xl pl-6 pr-3 py-2 -ml-6 -mr-3 mt-2 transition-all duration-200">
-                      <div className="w-4 h-4 rounded border-2 border-gray-400 dark:border-gray-500 mr-3 flex-shrink-0 bg-white dark:bg-gray-800 bg-opacity-60 dark:bg-opacity-60 ml-2"></div>
-                      <input
-                        type="text"
-                        value={newChecklistItemContent}
-                        onChange={(e) =>
-                          setNewChecklistItemContent(e.target.value)
-                        }
-                        className="flex-1 bg-transparent border-none outline-none text-sm leading-6 text-gray-800 dark:text-gray-200 placeholder-gray-500 dark:placeholder-gray-400"
-                        placeholder="Add new item..."
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            handleAddChecklistItem(note.id);
-                          }
-                          if (e.key === "Escape") {
-                            setAddingChecklistItem(null);
-                            setNewChecklistItemContent("");
-                          }
-                          if (
-                            e.key === "Backspace" &&
-                            newChecklistItemContent.trim() === ""
-                          ) {
-                            setAddingChecklistItem(null);
-                            setNewChecklistItemContent("");
-                          }
-                        }}
-                        onBlur={() => {
-                          if (newChecklistItemContent.trim()) {
-                            handleAddChecklistItem(note.id);
-                          }
-                          // Don't close the input on blur - let user continue adding items
-                          // Only close on explicit Escape key
-                        }}
-                        autoFocus
-                      />
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="flex-1 overflow-hidden flex flex-col relative">
-                  <p
-                    className={`text-base whitespace-pre-wrap break-words leading-7 m-0 p-0 flex-1 transition-all duration-200 ${
-                      note.done
-                        ? "text-gray-500 dark:text-gray-400 opacity-70 line-through"
-                        : "text-gray-800 dark:text-gray-200"
-                    }`}
-                  >
-                    {note.content}
-                  </p>
-                </div>
-              )}
-
-              {(user?.id === note.user.id || user?.isAdmin) &&
-                addingChecklistItem !== note.id && (
-                  <div className="absolute bottom-2 left-1/2 transform -translate-x-1/2">
-                    <button
-                      onClick={() => {
-                        if (note.isChecklist) {
-                          setAddingChecklistItem(note.id);
-                        } else {
-                          handleConvertToChecklist(note.id);
-                        }
-                      }}
-                      className="rounded-full w-10 h-10 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-200 shadow-lg hover:shadow-xl border-2 border-white dark:border-gray-800"
-                      style={{
-                        backgroundColor:
-                          typeof window !== "undefined" &&
-                          window.matchMedia &&
-                          window.matchMedia("(prefers-color-scheme: dark)")
-                            .matches
-                            ? `${note.color}20`
-                            : note.color,
-                      }}
-                      title={
-                        note.isChecklist
-                          ? "Add checklist item"
-                          : "Convert to checklist"
-                      }
-                    >
-                      <div className="bg-white dark:bg-gray-900 rounded-full w-8 h-8 flex items-center justify-center">
-                        <Pencil className="w-4 h-4 text-blue-500 dark:text-blue-400" />
-                      </div>
-                    </button>
-                  </div>
-                )}
-            </div>
+            />
           ))}
         </div>
 
         {/* Empty State */}
         {filteredNotes.length === 0 &&
           notes.length > 0 &&
-          (searchTerm ||
-            dateRange.startDate ||
-            dateRange.endDate ||
-            selectedAuthor ||
-            !showDoneNotes) && (
-            <div className="flex flex-col items-center justify-center h-96 text-gray-500 dark:text-gray-400">
+          (searchTerm || dateRange.startDate || dateRange.endDate || selectedAuthor) && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center px-4 text-center text-gray-500 dark:text-gray-400">
               <Search className="w-12 h-12 mb-4 text-gray-400 dark:text-gray-500" />
               <div className="text-xl mb-2">No notes found</div>
               <div className="text-sm mb-4 text-center">
@@ -2158,67 +873,32 @@ export default function BoardPage({
                 {searchTerm && <div>Search: &quot;{searchTerm}&quot;</div>}
                 {selectedAuthor && (
                   <div>
-                    Author:{" "}
-                    {uniqueAuthors.find((a) => a.id === selectedAuthor)?.name ||
-                      "Unknown"}
+                    Author: {uniqueAuthors.find((a) => a.id === selectedAuthor)?.name || "Unknown"}
                   </div>
                 )}
                 {(dateRange.startDate || dateRange.endDate) && (
                   <div>
                     Date range:{" "}
-                    {dateRange.startDate
-                      ? dateRange.startDate.toLocaleDateString()
-                      : "..."}{" "}
-                    -{" "}
-                    {dateRange.endDate
-                      ? dateRange.endDate.toLocaleDateString()
-                      : "..."}
+                    {dateRange.startDate ? dateRange.startDate.toLocaleDateString() : "..."} -{" "}
+                    {dateRange.endDate ? dateRange.endDate.toLocaleDateString() : "..."}
                   </div>
                 )}
-                {!showDoneNotes && <div>Completed notes are hidden</div>}
               </div>
               <Button
                 onClick={() => {
                   setSearchTerm("");
+                  setDebouncedSearchTerm("");
                   setDateRange({ startDate: null, endDate: null });
                   setSelectedAuthor(null);
-                  setShowDoneNotes(false);
-                  updateURL(
-                    "",
-                    { startDate: null, endDate: null },
-                    null,
-                    false
-                  );
+                  updateURL("", { startDate: null, endDate: null }, null);
                 }}
                 variant="outline"
-                className="flex items-center space-x-2"
+                className="flex items-center space-x-2 cursor-pointer"
               >
                 <span>Clear All Filters</span>
               </Button>
             </div>
           )}
-
-        {notes.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-96 text-gray-500 dark:text-gray-400">
-            <div className="text-xl mb-2">No notes yet</div>
-            <div className="text-sm mb-4">
-              Click &ldquo;Add Note&rdquo; to get started
-            </div>
-            <Button
-              onClick={() => {
-                if (boardId === "all-notes" && allBoards.length > 0) {
-                  handleAddNote(allBoards[0].id);
-                } else {
-                  handleAddNote();
-                }
-              }}
-              className="flex items-center space-x-2"
-            >
-              <Pencil className="w-4 h-4" />
-              <span>Add Your First Note</span>
-            </Button>
-          </div>
-        )}
       </div>
 
       {showAddBoard && (
@@ -2231,7 +911,7 @@ export default function BoardPage({
           }}
         >
           <div
-            className="bg-white dark:bg-zinc-950 bg-opacity-95 dark:bg-opacity-95 rounded-xl p-5 sm:p-7 w-full max-w-sm sm:max-w-md shadow-2xl border border-border dark:border-zinc-800"
+            className="bg-white dark:bg-zinc-950 bg-opacity-95 dark:bg-opacity-95 rounded-xl p-5 sm:p-7 w-full max-w-sm sm:max-w-md shadow-2xl border border-gray-200 dark:border-zinc-800"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-lg font-semibold mb-4 text-foreground dark:text-zinc-100">
@@ -2249,7 +929,7 @@ export default function BoardPage({
                     onChange={(e) => setNewBoardName(e.target.value)}
                     placeholder="Enter board name"
                     required
-                    className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-border dark:border-zinc-700"
+                    className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-gray-200 dark:border-zinc-700"
                   />
                 </div>
                 <div>
@@ -2261,7 +941,7 @@ export default function BoardPage({
                     value={newBoardDescription}
                     onChange={(e) => setNewBoardDescription(e.target.value)}
                     placeholder="Enter board description"
-                    className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-border dark:border-zinc-700"
+                    className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-gray-200 dark:border-zinc-700"
                   />
                 </div>
               </div>
@@ -2274,13 +954,13 @@ export default function BoardPage({
                     setNewBoardName("");
                     setNewBoardDescription("");
                   }}
-                  className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-border dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-gray-300 dark:border-zinc-700 hover:bg-zinc-100 hover:text-foreground hover:border-gray-300 dark:hover:bg-zinc-800"
                 >
                   Cancel
                 </Button>
                 <Button
                   type="submit"
-                  className="bg-blue-600 hover:bg-blue-700 text-white dark:bg-blue-500 dark:hover:bg-blue-600 dark:text-zinc-100"
+                  className="bg-blue-600 hover:bg-blue-700 text-zinc-100 dark:bg-blue-500 dark:hover:bg-blue-600 dark:text-zinc-100"
                 >
                   Create board
                 </Button>
@@ -2289,6 +969,195 @@ export default function BoardPage({
           </div>
         </div>
       )}
+
+      <AlertDialog
+        open={errorDialog.open}
+        onOpenChange={(open) => setErrorDialog({ open, title: "", description: "" })}
+      >
+        <AlertDialogContent className="bg-white dark:bg-zinc-950 border border-gray-200 dark:border-zinc-800">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-foreground dark:text-zinc-100">
+              {errorDialog.title}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground dark:text-zinc-400">
+              {errorDialog.description}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction
+              onClick={() => setErrorDialog({ open: false, title: "", description: "" })}
+              className="bg-red-600 hover:bg-red-700 text-white dark:bg-red-600 dark:hover:bg-red-700"
+            >
+              OK
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={boardSettingsDialog} onOpenChange={setBoardSettingsDialog}>
+        <AlertDialogContent className="bg-white dark:bg-zinc-950 border border-gray-200 dark:border-zinc-800 p-4 lg:p-6">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-foreground dark:text-zinc-100">
+              Board settings
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground dark:text-zinc-400">
+              Configure settings for &quot;{board?.name}&quot; board.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          <div className="py-4 space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-foreground dark:text-zinc-200 mb-1">
+                Board name
+              </label>
+              <Input
+                type="text"
+                value={boardSettings.name}
+                onChange={(e) => setBoardSettings((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="Enter board name"
+                className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-gray-200 dark:border-zinc-700"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-foreground dark:text-zinc-200 mb-1">
+                Description (optional)
+              </label>
+              <Input
+                type="text"
+                value={boardSettings.description}
+                onChange={(e) =>
+                  setBoardSettings((prev) => ({ ...prev, description: e.target.value }))
+                }
+                placeholder="Enter board description"
+                className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-gray-200 dark:border-zinc-700"
+              />
+            </div>
+            <div className="space-y-4">
+              <div className="flex items-center space-x-2">
+                <Switch
+                  id="isPublic"
+                  checked={boardSettings.isPublic}
+                  onCheckedChange={(checked) =>
+                    setBoardSettings((prev) => ({ ...prev, isPublic: checked as boolean }))
+                  }
+                />
+                <label
+                  htmlFor="isPublic"
+                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground dark:text-zinc-100"
+                >
+                  Make board public
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground dark:text-zinc-400 mt-1 ml-6">
+                When enabled, anyone with the link can view this board
+              </p>
+
+              {boardSettings.isPublic && (
+                <div className="ml-6 p-3 bg-gray-50 dark:bg-zinc-800 rounded-md">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-foreground dark:text-zinc-100">
+                        Public link
+                      </p>
+                      <p className="text-xs text-muted-foreground dark:text-zinc-400 break-all">
+                        {typeof window !== "undefined"
+                          ? `${window.location.origin}/public/boards/${boardId}`
+                          : ""}
+                      </p>
+                    </div>
+                    <Button
+                      onClick={handleCopyPublicUrl}
+                      size="sm"
+                      variant="outline"
+                      className="ml-3 flex items-center space-x-1"
+                    >
+                      {copiedPublicUrl ? (
+                        <>
+                          <span className="text-xs">✓</span>
+                          <span className="text-xs">Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span className="text-xs">Copy</span>
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="sendSlackUpdates"
+                checked={boardSettings.sendSlackUpdates}
+                onCheckedChange={(checked) =>
+                  setBoardSettings((prev) => ({ ...prev, sendSlackUpdates: checked as boolean }))
+                }
+                className="border-slate-500 bg-white/50 dark:bg-zinc-800 dark:text-zinc-300 dark:border-zinc-600 mt-1"
+              />
+              <label
+                htmlFor="sendSlackUpdates"
+                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 text-foreground dark:text-zinc-100"
+              >
+                Send updates to Slack
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground dark:text-zinc-400 mt-1 ml-6">
+              When enabled, note updates will be sent to your organization&apos;s Slack channel
+            </p>
+          </div>
+
+          <AlertDialogFooter className="flex !flex-row justify-between">
+            <Button
+              onClick={() => setDeleteConfirmDialog(true)}
+              variant="destructive"
+              className="mr-auto bg-red-600 hover:bg-red-700 text-white dark:bg-red-600 dark:hover:bg-red-700"
+            >
+              <Trash2 className="w-4 h-4" />
+              Delete <span className="hidden lg:inline">Board</span>
+            </Button>
+            <div className="flex space-x-2 items-center">
+              <AlertDialogCancel className="border-gray-400 text-foreground dark:text-zinc-100 dark:border-zinc-700 hover:bg-zinc-100 hover:text-foreground hover:border-gray-200 dark:hover:bg-zinc-800">
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => handleUpdateBoardSettings(boardSettings)}
+                className="bg-blue-600 hover:bg-blue-700 text-white dark:bg-blue-500 dark:hover:bg-blue-600 dark:text-white"
+              >
+                Save settings
+              </AlertDialogAction>
+            </div>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={deleteConfirmDialog} onOpenChange={setDeleteConfirmDialog}>
+        <AlertDialogContent className="bg-white dark:bg-zinc-950 border border-gray-200 dark:border-zinc-800">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-foreground dark:text-zinc-100">
+              Delete Board
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-muted-foreground dark:text-zinc-400">
+              Are you sure you want to delete &quot;{board?.name}&quot;? This action cannot be
+              undone and will permanently delete all notes in this board.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="bg-white dark:bg-zinc-900 text-foreground dark:text-zinc-100 border border-gray-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteBoard}
+              className="bg-red-600 hover:bg-red-700 text-white dark:bg-red-600 dark:hover:bg-red-700"
+            >
+              Delete Board
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

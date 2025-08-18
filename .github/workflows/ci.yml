@@ -1,16 +1,44 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: ["main"]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-4
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: gumboard_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      GITHUB_CLIENT_ID: dummy-client-id
+      GITHUB_CLIENT_SECRET: dummy-client-secret
+      AUTH_SECRET: sample-auth-secret
+      AUTH_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gumboard_test
+      EMAIL_FROM: noreply@example.com
+      AUTH_RESEND_KEY: dummy-resend-key
+
     steps:
       - uses: actions/checkout@v4
 
@@ -21,15 +49,26 @@ jobs:
 
       - run: npm ci
 
-      - name: Lint
-        run: npm run lint
+      - name: Set up database schema
+        run: |
+          npx prisma migrate deploy
+          npx prisma generate
 
       - name: Test
         run: npm test
 
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
+      - name: Cache Playwright Browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-chromium-
 
+      - name: Install Playwright Browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install chromium --only-shell
 
       - name: E2E Tests
         run: npm run test:e2e

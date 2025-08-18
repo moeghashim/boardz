@@ -1,32 +1,34 @@
-import { auth } from "@/auth"
-import { db } from "@/lib/db"
-import { NextRequest, NextResponse } from "next/server"
+import { auth } from "@/auth";
+import { db } from "@/lib/db";
+import { NextRequest, NextResponse } from "next/server";
 
 export async function GET() {
   try {
-    const session = await auth()
-    
+    const session = await auth();
+
     if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Get user with organization
     const user = await db.user.findUnique({
       where: { id: session.user.id },
-      include: { organization: true }
-    })
+      select: {
+        organizationId: true,
+      },
+    });
 
-    if (!user?.organization) {
-      return NextResponse.json({ error: "No organization found" }, { status: 404 })
+    if (!user?.organizationId) {
+      return NextResponse.json({ error: "No organization found" }, { status: 404 });
     }
 
     // Get all boards for the organization
     const boards = await db.board.findMany({
-      where: { organizationId: user.organization.id },
+      where: { organizationId: user.organizationId },
       select: {
         id: true,
         name: true,
         description: true,
+        isPublic: true,
         createdBy: true,
         createdAt: true,
         updatedAt: true,
@@ -34,44 +36,46 @@ export async function GET() {
           select: {
             notes: {
               where: {
-                deletedAt: null
-              }
-            }
-          }
-        }
+                deletedAt: null,
+                archivedAt: null,
+              },
+            },
+          },
+        },
       },
-      orderBy: { createdAt: "desc" }
-    })
+      orderBy: { createdAt: "desc" },
+    });
 
-    return NextResponse.json({ boards })
+    return NextResponse.json({ boards });
   } catch (error) {
-    console.error("Error fetching boards:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    console.error("Error fetching boards:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await auth()
-    
+    const session = await auth();
+
     if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { name, description } = await request.json()
+    const { name, description, isPublic } = await request.json();
 
     if (!name) {
-      return NextResponse.json({ error: "Board name is required" }, { status: 400 })
+      return NextResponse.json({ error: "Board name is required" }, { status: 400 });
     }
 
-    // Get user with organization
     const user = await db.user.findUnique({
       where: { id: session.user.id },
-      include: { organization: true }
-    })
+      select: {
+        organizationId: true,
+      },
+    });
 
-    if (!user?.organization) {
-      return NextResponse.json({ error: "No organization found" }, { status: 404 })
+    if (!user?.organizationId) {
+      return NextResponse.json({ error: "No organization found" }, { status: 404 });
     }
 
     // Create new board
@@ -79,19 +83,35 @@ export async function POST(request: NextRequest) {
       data: {
         name,
         description,
-        organizationId: user.organization.id,
-        createdBy: session.user.id
+        isPublic: Boolean(isPublic || false),
+        organizationId: user.organizationId,
+        createdBy: session.user.id,
       },
-      include: {
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        isPublic: true,
+        createdBy: true,
+        createdAt: true,
+        updatedAt: true,
+        organizationId: true,
         _count: {
-          select: { notes: true },
+          select: {
+            notes: {
+              where: {
+                deletedAt: null,
+                archivedAt: null,
+              },
+            },
+          },
         },
       },
-    })
+    });
 
-    return NextResponse.json({ board }, { status: 201 })
+    return NextResponse.json({ board }, { status: 201 });
   } catch (error) {
-    console.error("Error creating board:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    console.error("Error creating board:", error);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
-}  
+}

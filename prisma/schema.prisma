@@ -6,6 +6,8 @@
 
 generator client {
   provider = "prisma-client-js"
+
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -62,6 +64,7 @@ model User {
   createdSelfServeInvites OrganizationSelfServeInvite[]
   notes          Note[]
 
+  @@index([organizationId], name: "idx_user_org")
   @@map("users")
 }
 
@@ -83,6 +86,8 @@ model Board {
   id             String       @id @default(cuid())
   name           String
   description    String?
+  isPublic       Boolean      @default(false)
+  sendSlackUpdates Boolean    @default(true)
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   createdBy      String
@@ -90,16 +95,16 @@ model Board {
   updatedAt      DateTime     @updatedAt
   notes          Note[]
 
+  // Performance indexes
+  @@index([organizationId, createdAt], name: "idx_board_org_created")
   @@map("boards")
 }
 
 model Note {
   id        String @id @default(cuid())
-  content   String @db.Text
   color     String @default("#fef3c7") // Default yellow color
-  done      Boolean @default(false) // Track completion status
-  isChecklist Boolean @default(false) // Track if note is a checklist
-  checklistItems Json? // Store checklist items as JSON
+  checklistItems ChecklistItem[]
+  archivedAt     DateTime? // Track archived status
   slackMessageId String?
   boardId   String
   board     Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
@@ -109,7 +114,27 @@ model Note {
   updatedAt DateTime @updatedAt
   deletedAt DateTime? // Soft delete timestamp
 
+  // Performance indexes
+  @@index([boardId, deletedAt], name: "idx_note_board_deleted")
+  @@index([boardId, createdAt], name: "idx_note_board_created")
+  @@index([createdBy, deletedAt], name: "idx_note_user_deleted")
   @@map("notes")
+}
+
+model ChecklistItem {
+  id             String   @id @default(cuid())
+  content        String   @db.Text
+  checked        Boolean  @default(false)
+  order          Int      @default(0)
+  noteId         String
+  slackMessageId String?
+  note           Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@map("checklist_items")
+  @@index([noteId])
+  @@index([noteId, order])
 }
 
 model OrganizationInvite {

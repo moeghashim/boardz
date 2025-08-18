@@ -1,16 +1,14 @@
-import NextAuth from "next-auth"
-import { PrismaAdapter } from "@auth/prisma-adapter"
-import Resend from "next-auth/providers/resend"
-import { PrismaClient } from "@prisma/client"
-
-const prisma = new PrismaClient()
+import NextAuth from "next-auth";
+import { PrismaAdapter } from "@auth/prisma-adapter";
+import Resend from "next-auth/providers/resend";
+import { db as prisma } from "@/lib/db";
+import { env } from "@/lib/env";
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
   adapter: PrismaAdapter(prisma),
   providers: [
     Resend({
-      from: process.env.EMAIL_FROM!,
-      apiKey: process.env.AUTH_RESEND_KEY!,
+      from: env.EMAIL_FROM,
     }),
   ],
   pages: {
@@ -20,15 +18,15 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   },
   callbacks: {
     async signIn() {
-      return true
+      return true;
     },
     async redirect({ url, baseUrl }) {
       if (url.includes("/invite/accept")) {
-        return url.startsWith("/") ? `${baseUrl}${url}` : url
+        return url.startsWith("/") ? `${baseUrl}${url}` : url;
       }
-      if (url.startsWith("/")) return `${baseUrl}/dashboard`
-      else if (new URL(url).origin === baseUrl) return url
-      return `${baseUrl}/dashboard`
+      if (url.startsWith("/")) return `${baseUrl}/dashboard`;
+      else if (new URL(url).origin === baseUrl) return url;
+      return `${baseUrl}/dashboard`;
     },
   },
-})
+});
