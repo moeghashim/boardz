@@ -477,6 +477,7 @@ export function Note({
                 handleReorderChecklistItems(note.id, newItems);
               }
             }}
+            id={`note-${note.id}-dnd`}
           >
             <DraggableContainer className="space-y-1">
               {note.checklistItems?.map((item) => (

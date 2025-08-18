@@ -32,12 +32,14 @@ export interface DraggableRootProps<T extends DraggableItem> {
   items: T[];
   onItemsChange: (items: T[]) => void;
   children: React.ReactNode;
+  id?: string;
 }
 
 export function DraggableRoot<T extends DraggableItem>({
   items,
   onItemsChange,
   children,
+  id,
 }: DraggableRootProps<T>) {
   const [activeId, setActiveId] = React.useState<UniqueIdentifier | null>(null);
 
@@ -74,6 +76,7 @@ export function DraggableRoot<T extends DraggableItem>({
   return (
     <DraggableInternalContext.Provider value={contextValue}>
       <DndContext
+        id={id}
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragStart={handleDragStart}
